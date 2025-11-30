@@ -42,6 +42,9 @@ process GATK_HAPLOTYPECALLER {
         --annotation-group AS_StandardAnnotation \\
         --annotation-group StandardHCAnnotation \\
         --do-not-run-physical-phasing \\
+        --max-reads-per-alignment-start 50 \\
+        --max-alternate-alleles 6 \\
+        --sample-ploidy 20 \\
         -R ref.fa.gz \\
         -I ${meta.id}.bam \\
         -L ${meta.contig} \\
