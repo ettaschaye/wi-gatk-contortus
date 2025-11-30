@@ -28,6 +28,10 @@ include { LOCAL_REPORT                                      } from "./modules/lo
 // Needed to publish results
 nextflow.preview.output = true
 
+// set defaults to avoid errors in log_summary()
+bam_folder = params.bam_location ?: "bam_folder_not_set"
+gvcf_folder = params.gvcf_location ?: "gvcf_folder_not_set"
+
 date = new Date().format( 'yyyyMMdd' )
 
 // Debug
