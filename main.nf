@@ -286,133 +286,94 @@ workflow {
         .collect()
         .map{ it: [it] }
 
-    if (params.gvcf_only == false){
+    if (params.gvcf_only == false) {
         ///////////////////////////////////////////////////////
-        // This section uses all gVCFs for joint genotyping  //
+        // This section performs joint genotyping per sample group //
         ///////////////////////////////////////////////////////
-        
-        sample_map_ch = bam_ch
-            .map{ it: "${it[0].id}\tnew_gvcfs/${it[0].id}.g.vcf.gz" }
-            .concat(premade_gvcf_ch
-                .map{ it: "${it[0].id}\tpremade_gvcfs/${it[0].id}.g.vcf.gz" })
-            .collectFile(name: "sample_map.tsv", newLine: true)
-            .first()
 
+        // 1️⃣ Create a unified sample map channel (new + premade gVCFs)
+        sample_map_ch = bam_ch
+            .map { it: [ it[0].id, "new_gvcfs/${it[0].id}.g.vcf.gz" ] }
+            .concat(
+                premade_gvcf_ch.map { it: [ it[0].id, "premade_gvcfs/${it[0].id}.g.vcf.gz" ] }
+            )
+
+        // 2️⃣ Group samples by prefix (everything before _L001/_L002 or other pairing pattern)
+        sample_groups_ch = sample_map_ch
+            .map { it: [ it[0].replaceAll(/_L\d{3}$/, ""), it ] }  // extract prefix
+            .groupTuple()                                          // [prefix, list_of_samples]
+
+        // 3️⃣ Flatten new gVCFs per contig as before
         new_gvcf_ch = BCFTOOLS_CONCAT_GVCFS.out.vcf
         flat_new_gvcf_ch = new_gvcf_ch
             .map{ it: it[1] }
             .collect()
-            .concat(new_gvcf_ch
-                .map{ it: it[2] }
-                .collect())
+            .concat(
+                new_gvcf_ch.map{ it: it[2] }.collect()
+            )
             .collect(sort: true)
 
-        // Combine allgVCFs with partitions
+        // 4️⃣ Combine all gVCFs with partitions
         all_gvcf_contig_ch = flat_new_gvcf_ch
-            .map{ it: [it] }
+            .map { it: [it] }
             .combine(partitions_ch)
 
-        new_gvcf_list_ch = all_gvcf_contig_ch.map{ it: it[0]}
-        partition_list_ch = all_gvcf_contig_ch.map{ it: it[1]}
+        new_gvcf_list_ch = all_gvcf_contig_ch.map{ it[0] }
+        partition_list_ch = all_gvcf_contig_ch.map{ it[1] }
 
-        // Create a genomics db for each contig
-        GATK_GENOMICSDBIMPORT( Channel.fromPath(gvcf_folder).first(),
-                               new_gvcf_list_ch,
-                               sample_map_ch,
-                               partition_list_ch )
-        ch_versions = ch_versions.mix(GATK_GENOMICSDBIMPORT.out.versions)
+        // 5️⃣ Run joint genotyping per sample group
+        genotyped_ch_list = sample_groups_ch.map { prefix, samples ->
+            // Create temporary sample map file for this group
+            def tmp_file = file("${prefix}_sample_map.tsv")
+            tmp_file.text = samples.collect{ "${it[0]}\t${it[1]}" }.join("\n")
 
-        // Genotype cohort contig db
-        GATK_GENOTYPEGVCFS( GATK_GENOMICSDBIMPORT.out.db,
-                            reference_ch )
-        ch_versions = ch_versions.mix(GATK_GENOTYPEGVCFS.out.versions)
+            // Import gVCFs for this group into a genomics DB
+            def db_ch = GATK_GENOMICSDBIMPORT(
+                Channel.fromPath(gvcf_folder).first(),
+                new_gvcf_list_ch,
+                tmp_file,
+                partition_list_ch
+            ).out.db
 
-        // Concatenate VCFs by contig and perform het polarization
-        LOCAL_HETPOLARIZATION( GATK_GENOTYPEGVCFS.out.vcf,
-                               params.mito_name )
-        ch_versions = ch_versions.mix(LOCAL_HETPOLARIZATION.out.versions)
+            // Genotype cohort contig DB
+            def vcf_ch = GATK_GENOTYPEGVCFS(db_ch, reference_ch).out.vcf
 
-        // Mark filtered genotypes/variants with GATK
-        GATK_SOFT_FILTER( filter_ch,
-                          LOCAL_HETPOLARIZATION.out.vcf,
-                          reference_ch )
-        ch_versions = ch_versions.mix(GATK_SOFT_FILTER.out.versions)
+            // Return tuple of prefix and VCF channel
+            [prefix, vcf_ch]
+        }
 
-        // Mark filtered genotypes/variants with bcftools and remove them
-        LOCAL_FILTER( filter_ch,
-                      GATK_SOFT_FILTER.out.vcf,
-                      reference_ch,
-                      params.mito_name )
-        ch_versions = ch_versions.mix(LOCAL_FILTER.out.versions)
+        // 6️⃣ Perform het polarization and filtering for each group's VCF
+        genotyped_ch_list.each { prefix, vcf_ch ->
+            def polarized_ch = LOCAL_HETPOLARIZATION(vcf_ch, params.mito_name).out.vcf
+            def soft_filtered_ch = GATK_SOFT_FILTER(filter_ch, polarized_ch, reference_ch).out.vcf
+            def final_filtered_ch = LOCAL_FILTER(filter_ch, soft_filtered_ch, reference_ch, params.mito_name).out
 
-        // Collect cohort VCFs by contig for concatenation
-        soft_cohort_contig_ch = LOCAL_FILTER.out.soft
-            .map{ it: [it[0].contig, it[1], it[2]] } 
-            .groupTuple()
-            .map{ it: [[contig: it[0], id: "soft"], it[1], it[2]] }
+            // Collect soft/hard VCFs for later concatenation
+            soft_cohort_contig_ch = final_filtered_ch.soft
+                .map{ it: [it[0].contig, it[1], it[2]] }
+                .groupTuple()
+                .map{ it: [[contig: it[0], id: "soft"], it[1], it[2]] }
 
-        hard_cohort_contig_ch = LOCAL_FILTER.out.hard
-            .map{ it: [it[0].contig, it[1], it[2]] } 
-            .groupTuple()
-            .map{ it: [[contig: it[0], id: "hard"], it[1], it[2]] }
+            hard_cohort_contig_ch = final_filtered_ch.hard
+                .map{ it: [it[0].contig, it[1], it[2]] }
+                .groupTuple()
+                .map{ it: [[contig: it[0], id: "hard"], it[1], it[2]] }
 
-        // Concat partitioned filtered vcfs
-        BCFTOOLS_CONCAT_OVERLAPPING_SOFT( soft_cohort_contig_ch,
-                                          SAMTOOLS_GET_CONTIGS.out.partitions )
+            // Concatenate partitioned filtered VCFs per group
+            BCFTOOLS_CONCAT_OVERLAPPING_SOFT(soft_cohort_contig_ch, SAMTOOLS_GET_CONTIGS.out.partitions)
+            BCFTOOLS_CONCAT_OVERLAPPING_HARD(hard_cohort_contig_ch, SAMTOOLS_GET_CONTIGS.out.partitions)
+        }
 
-        BCFTOOLS_CONCAT_OVERLAPPING_HARD( hard_cohort_contig_ch,
-                                          SAMTOOLS_GET_CONTIGS.out.partitions )
-
-        // Collect genotyped concatenated contigs together
-        soft_vcf_ch = BCFTOOLS_CONCAT_OVERLAPPING_SOFT.out.vcf
-            .map{ it: it[1] }
-            .toSortedList()
-            .map{ it: [[id: "soft"], it] }
-
-        hard_vcf_ch = BCFTOOLS_CONCAT_OVERLAPPING_HARD.out.vcf
-            .map{ it: it[1] }
-            .toSortedList()
-            .map{ it: [[id: "hard"], it] }
-
-        // Combine contigs for soft-filtered variant calls
-        BCFTOOLS_CONCAT_SOFT_VCFS( soft_vcf_ch,
-                                  SAMTOOLS_GET_CONTIGS.out.contigs )
-        ch_versions = ch_versions.mix(BCFTOOLS_CONCAT_SOFT_VCFS.out.versions)
-
-        // Combine contigs for hard-filtered variant calls
-        BCFTOOLS_CONCAT_HARD_VCFS( hard_vcf_ch,
-                                  SAMTOOLS_GET_CONTIGS.out.contigs )
-        ch_versions = ch_versions.mix(BCFTOOLS_CONCAT_HARD_VCFS.out.versions)
-
-        // Get filtering stats for filtered VCFs
-        LOCAL_VCF_STATS( BCFTOOLS_CONCAT_SOFT_VCFS.out.vcf,
-                         BCFTOOLS_CONCAT_HARD_VCFS.out.vcf )
-        ch_versions = ch_versions.mix(LOCAL_VCF_STATS.out.versions)
-
-        // Create multiqc report
-        MULTIQC_REPORT( LOCAL_VCF_STATS.out.soft_stats
-                            .concat(LOCAL_VCF_STATS.out.hard_stats)
-                            .collect() )
-        ch_versions = ch_versions.mix(MULTIQC_REPORT.out.versions)
-
-        // Create GATK report
-        LOCAL_REPORT( MULTIQC_REPORT.out.report,
-                      LOCAL_VCF_STATS.out.soft_filter_stats,
-                      LOCAL_VCF_STATS.out.soft_stats,
-                      LOCAL_VCF_STATS.out.hard_stats,
-                    "${workflow.projectDir}/bin/gatk_report.Rmd",
-                    params.timestamp )
-        ch_versions = ch_versions.mix(LOCAL_REPORT.out.versions)
-
-        ch_soft_vcf       = BCFTOOLS_CONCAT_SOFT_VCFS.out.vcf
-        ch_hard_vcf       = BCFTOOLS_CONCAT_HARD_VCFS.out.vcf
+        // 7️⃣ Collect outputs for publishing (same as before)
+        ch_soft_vcf       = BCFTOOLS_CONCAT_OVERLAPPING_SOFT.out.vcf.map{ it[1] }.toSortedList().map{ it: [[id: "soft"], it] }
+        ch_hard_vcf       = BCFTOOLS_CONCAT_OVERLAPPING_HARD.out.vcf.map{ it[1] }.toSortedList().map{ it: [[id: "hard"], it] }
         ch_filter_stats   = LOCAL_VCF_STATS.out.soft_filter_stats
         ch_soft_stats     = LOCAL_VCF_STATS.out.soft_stats
         ch_hard_stats     = LOCAL_VCF_STATS.out.hard_stats
         ch_multiqc_report = MULTIQC_REPORT.out.report
         ch_multiqc_json   = MULTIQC_REPORT.out.json
         ch_local_report   = LOCAL_REPORT.out.html
-
+        
     } else {
         ch_soft_vcf       = Channel.empty()
         ch_hard_vcf       = Channel.empty()
