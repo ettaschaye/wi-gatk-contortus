@@ -1,7 +1,9 @@
 #!/usr/bin/env nextflow 
 /*
-    Andersen Lab C. elegans Variant Calling Pipeline
+    H. contortus Variant Calling Pipeline 
+    Adapted from Andersen Lab C. elegans Variant Calling Pipeline
     Authors:
+    - Etta Schaye <ettaschaye@gmail.com>
     - Stefan Zdraljevic
     - Daniel Cook <danielecook@gmail.com>
     - Dan Lu
