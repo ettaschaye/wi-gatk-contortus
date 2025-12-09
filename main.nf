@@ -34,6 +34,10 @@ nextflow.preview.output = true
 bam_folder = params.bam_location ?: "bam_folder_not_set"
 gvcf_folder = params.gvcf_location ?: "gvcf_folder_not_set"
 
+// Not sure where to publish this
+params.sample_ploidy = params.sample_ploidy ?: 2
+
+
 date = new Date().format( 'yyyyMMdd' )
 
 // Debug
@@ -177,6 +181,10 @@ nextflow main.nf --sample_sheet=/path/sample_sheet.txt --species c_elegans --bam
     Reference Genome
     --------------- 
     --reference                The fa.gz reference file to use       ${reference}
+
+    HaplotypeCaller Parameters
+    ==========                 ===========                           ========================    
+    --sample_ploidy            Sample ploidy for GATK               ${params.sample_ploidy}
 
     Variant Filters         
     ---------------           
