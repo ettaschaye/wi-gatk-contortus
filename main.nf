@@ -185,6 +185,7 @@ nextflow main.nf --sample_sheet=/path/sample_sheet.txt --species c_elegans --bam
     HaplotypeCaller Parameters
     ==========                 ===========                           ========================    
     --sample_ploidy            Sample ploidy for GATK               ${params.sample_ploidy}
+    --haplotypecaller_time     Walltime for GATK HaplotypeCaller    ${params.haplotypecaller_time}
 
     Variant Filters         
     ---------------           
